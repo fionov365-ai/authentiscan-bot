@@ -965,6 +965,22 @@ async def set_signs(message: Message, state: FSMContext):
     await state.update_data(signs=message.text)
     data = await state.get_data()
     report_id = await save_report(message.from_user.id, data)
+    # Запись в Google Sheets
+    try:
+        if hasattr(__builtins__, 'append_report_to_sheet') or \
+                callable(getattr(__builtins__, 'append_report_to_sheet', None)):
+            append_report_to_sheet(
+                report_id,
+                message.from_user.full_name,
+                data['brand'],
+                data['category'],
+                data['location'],
+                data['price'],
+                len(data['photos']),
+                'pending'
+            )
+    except Exception:
+        pass
     text = (
         f"✅ Заявка #{report_id} отправлена!\n\n"
         f"🏷 Бренд: {data['brand']}\n"
