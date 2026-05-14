@@ -35,6 +35,11 @@ class ReportForm(StatesGroup):
     signs = State()
 
 
+class ModerationForm(StatesGroup):
+    waiting_reward = State()
+    waiting_reject_reason = State()
+
+
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -56,9 +61,17 @@ async def init_db():
                 signs TEXT,
                 photo_count INTEGER,
                 status TEXT DEFAULT 'pending',
+                reward INTEGER DEFAULT 0,
+                reject_reason TEXT,
                 created_at TEXT
             )
         """)
+        # Безопасно добавляем новые колонки, если база старая
+        for col, coltype in [("reward", "INTEGER DEFAULT 0"), ("reject_reason", "TEXT")]:
+            try:
+                await db.execute(f"ALTER TABLE reports ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -83,14 +96,61 @@ async def save_report(user_id, data):
         return cursor.lastrowid
 
 
+async def get_report(report_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id, user_id, brand, category, location, price, signs, status, reward FROM reports WHERE id=?",
+            (report_id,)
+        ) as cursor:
+            return await cursor.fetchone()
+
+
+async def update_report_status(report_id, status, reward=0, reject_reason=None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE reports SET status=?, reward=?, reject_reason=? WHERE id=?",
+            (status, reward, reject_reason, report_id)
+        )
+        await db.commit()
+
+
 async def get_user_stats(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT COUNT(*), SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END), SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) FROM reports WHERE user_id=?",
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='confirmed' THEN reward ELSE 0 END) "
+            "FROM reports WHERE user_id=?",
             (user_id,)
         ) as cursor:
             row = await cursor.fetchone()
-            return {'total': row[0] or 0, 'confirmed': row[1] or 0, 'pending': row[2] or 0}
+            return {
+                'total': row[0] or 0,
+                'confirmed': row[1] or 0,
+                'pending': row[2] or 0,
+                'rejected': row[3] or 0,
+                'earned': row[4] or 0
+            }
+
+
+async def get_user_reports(user_id, limit=10):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id, brand, category, status, reward, created_at FROM reports WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (user_id, limit)
+        ) as cursor:
+            return await cursor.fetchall()
+
+
+def main_menu_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Подать заявку", callback_data="new_report")],
+        [InlineKeyboardButton(text="💰 Мой кабинет", callback_data="my_cabinet")],
+        [InlineKeyboardButton(text="📋 Мои заявки", callback_data="my_reports")],
+        [InlineKeyboardButton(text="ℹ️ Как это работает", callback_data="how_it_works")]
+    ])
 
 
 @router.message(CommandStart())
@@ -104,12 +164,7 @@ async def cmd_start(message: Message, state: FSMContext):
         "🌍 Работаем в 50+ городах России и СНГ\n"
         "⚡ Проверка занимает до 7 дней"
     )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Подать заявку", callback_data="new_report")],
-        [InlineKeyboardButton(text="📋 Мои заявки", callback_data="my_reports")],
-        [InlineKeyboardButton(text="ℹ️ Как это работает", callback_data="how_it_works")]
-    ])
-    await message.answer(text, reply_markup=keyboard)
+    await message.answer(text, reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == "how_it_works")
@@ -133,26 +188,54 @@ async def how_it_works(callback: CallbackQuery):
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
+    await callback.message.edit_text("🏠 Главное меню\n\nВыбери действие:", reply_markup=main_menu_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_cabinet")
+async def my_cabinet(callback: CallbackQuery):
+    stats = await get_user_stats(callback.from_user.id)
+    confirm_rate = 0
+    if stats['total'] > 0:
+        confirm_rate = round(stats['confirmed'] / stats['total'] * 100)
+    text = (
+        f"💰 Личный кабинет\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"💵 Заработано всего: {stats['earned']:,} ₽\n"
+        f"⏳ Заявок на проверке: {stats['pending']}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"📊 Статистика:\n"
+        f"📝 Всего заявок: {stats['total']}\n"
+        f"✅ Подтверждено: {stats['confirmed']}\n"
+        f"❌ Отклонено: {stats['rejected']}\n"
+        f"🎯 Процент подтверждения: {confirm_rate}%"
+    ).replace(",", " ")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Подать заявку", callback_data="new_report")],
         [InlineKeyboardButton(text="📋 Мои заявки", callback_data="my_reports")],
-        [InlineKeyboardButton(text="ℹ️ Как это работает", callback_data="how_it_works")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
     ])
-    await callback.message.edit_text("🏠 Главное меню\n\nВыбери действие:", reply_markup=keyboard)
+    await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
 
 @router.callback_query(F.data == "my_reports")
 async def my_reports(callback: CallbackQuery):
-    stats = await get_user_stats(callback.from_user.id)
-    text = (
-        f"📋 Твоя статистика:\n\n"
-        f"📝 Всего заявок: {stats['total']}\n"
-        f"✅ Подтверждено: {stats['confirmed']}\n"
-        f"⏳ На проверке: {stats['pending']}\n\n"
-    )
-    if stats['total'] == 0:
-        text += "Ты ещё не подавал заявок. Найди первую подделку!"
+    reports = await get_user_reports(callback.from_user.id)
+    if not reports:
+        text = "📋 У тебя пока нет заявок.\n\nНайди первую подделку и подай заявку!"
+    else:
+        text = "📋 Твои последние заявки:\n\n"
+        status_emoji = {'pending': '⏳', 'confirmed': '✅', 'rejected': '❌'}
+        status_name = {'pending': 'На проверке', 'confirmed': 'Подтверждено', 'rejected': 'Отклонено'}
+        for r in reports:
+            rid, brand, category, status, reward, created = r
+            emoji = status_emoji.get(status, '⏳')
+            name = status_name.get(status, 'На проверке')
+            text += f"{emoji} #{rid} · {brand} ({category})\n"
+            text += f"     {name}"
+            if status == 'confirmed' and reward:
+                text += f" · +{reward:,} ₽".replace(",", " ")
+            text += "\n\n"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Подать заявку", callback_data="new_report")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
@@ -293,7 +376,8 @@ async def set_signs(message: Message, state: FSMContext):
         f"📍 Место: {data['location']}\n"
         f"💵 Цена: {data['price']} ₽\n"
         f"📸 Фото: {len(data['photos'])} шт.\n\n"
-        f"⏱ Срок проверки: до 7 дней"
+        f"⏱ Срок проверки: до 7 дней\n"
+        f"Уведомлю о результате здесь же!"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Подать ещё", callback_data="new_report")],
@@ -301,6 +385,7 @@ async def set_signs(message: Message, state: FSMContext):
     ])
     await message.answer(text, reply_markup=keyboard)
 
+    # Отправка админу с кнопками модерации
     if ADMIN_ID:
         try:
             admin_text = (
@@ -315,13 +400,115 @@ async def set_signs(message: Message, state: FSMContext):
                 f"🔍 Признаки:\n{data['signs']}\n\n"
                 f"📸 Фото ниже ⬇️"
             )
-            await bot.send_message(ADMIN_ID, admin_text)
+            mod_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{report_id}"),
+                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{report_id}")]
+            ])
+            await bot.send_message(ADMIN_ID, admin_text, reply_markup=mod_keyboard)
             for photo_id in data['photos']:
                 await bot.send_photo(ADMIN_ID, photo_id)
         except Exception as e:
             logging.error(f"Не удалось отправить админу: {e}")
     await state.clear()
 
+
+# ============ МОДЕРАЦИЯ (только для админа) ============
+
+@router.callback_query(F.data.startswith("approve_"))
+async def approve_report(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+    report_id = int(callback.data.replace("approve_", ""))
+    await state.set_state(ModerationForm.waiting_reward)
+    await state.update_data(moderating_report=report_id)
+    await callback.message.answer(
+        f"✅ Подтверждение заявки #{report_id}\n\n"
+        f"Введи сумму вознаграждения охотнику в рублях (только цифры):"
+    )
+    await callback.answer()
+
+
+@router.message(ModerationForm.waiting_reward, F.text)
+async def set_reward(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    reward = ''.join(filter(str.isdigit, message.text))
+    if not reward:
+        await message.answer("❌ Введи сумму цифрами, например: 4000")
+        return
+    reward = int(reward)
+    data = await state.get_data()
+    report_id = data.get('moderating_report')
+    report = await get_report(report_id)
+    if not report:
+        await message.answer("Заявка не найдена.")
+        await state.clear()
+        return
+    await update_report_status(report_id, 'confirmed', reward=reward)
+    await message.answer(f"✅ Заявка #{report_id} подтверждена. Награда: {reward:,} ₽".replace(",", " "))
+    # Уведомление охотнику
+    hunter_id = report[1]
+    try:
+        await bot.send_message(
+            hunter_id,
+            f"🎉 Отличные новости!\n\n"
+            f"Твоя заявка #{report_id} ({report[2]}) подтверждена!\n\n"
+            f"💰 Вознаграждение: {reward:,} ₽\n\n".replace(",", " ") +
+            f"Деньги поступят на твой баланс. Спасибо за помощь в борьбе с контрафактом!"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось уведомить охотника: {e}")
+        await message.answer("⚠️ Не удалось отправить уведомление охотнику (возможно, заблокировал бота).")
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("reject_"))
+async def reject_report(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+    report_id = int(callback.data.replace("reject_", ""))
+    await state.set_state(ModerationForm.waiting_reject_reason)
+    await state.update_data(moderating_report=report_id)
+    await callback.message.answer(
+        f"❌ Отклонение заявки #{report_id}\n\n"
+        f"Напиши причину отклонения (охотник её увидит):"
+    )
+    await callback.answer()
+
+
+@router.message(ModerationForm.waiting_reject_reason, F.text)
+async def set_reject_reason(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    reason = message.text
+    data = await state.get_data()
+    report_id = data.get('moderating_report')
+    report = await get_report(report_id)
+    if not report:
+        await message.answer("Заявка не найдена.")
+        await state.clear()
+        return
+    await update_report_status(report_id, 'rejected', reject_reason=reason)
+    await message.answer(f"❌ Заявка #{report_id} отклонена.")
+    # Уведомление охотнику
+    hunter_id = report[1]
+    try:
+        await bot.send_message(
+            hunter_id,
+            f"📋 Обновление по заявке #{report_id} ({report[2]})\n\n"
+            f"К сожалению, заявка отклонена.\n\n"
+            f"Причина: {reason}\n\n"
+            f"Не расстраивайся — подавай новые заявки, учитывая этот опыт!"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось уведомить охотника: {e}")
+        await message.answer("⚠️ Не удалось отправить уведомление охотнику.")
+    await state.clear()
+
+
+# ============ КОМАНДЫ АДМИНА ============
 
 @router.message(Command("stats"))
 async def admin_stats(message: Message):
@@ -332,7 +519,32 @@ async def admin_stats(message: Message):
             users_count = (await cursor.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM reports") as cursor:
             reports_count = (await cursor.fetchone())[0]
-    await message.answer(f"📊 Статистика:\n👥 Пользователей: {users_count}\n📋 Заявок: {reports_count}")
+        async with db.execute("SELECT COUNT(*) FROM reports WHERE status='pending'") as cursor:
+            pending_count = (await cursor.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM reports WHERE status='confirmed'") as cursor:
+            confirmed_count = (await cursor.fetchone())[0]
+        async with db.execute("SELECT SUM(reward) FROM reports WHERE status='confirmed'") as cursor:
+            total_paid = (await cursor.fetchone())[0] or 0
+    await message.answer(
+        f"📊 Статистика бота:\n\n"
+        f"👥 Пользователей: {users_count}\n"
+        f"📋 Заявок всего: {reports_count}\n"
+        f"⏳ На проверке: {pending_count}\n"
+        f"✅ Подтверждено: {confirmed_count}\n"
+        f"💰 Выплачено суммарно: {total_paid:,} ₽".replace(",", " ")
+    )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "ℹ️ Помощь\n\n"
+        "/start — главное меню\n"
+        "/help — эта справка\n\n"
+        "Как подать заявку: нажми «🚀 Подать заявку» и следуй шагам.\n"
+        "Свой баланс и историю смотри в «💰 Мой кабинет».\n\n"
+        "Вопросы: @authentiscan_support"
+    )
 
 
 async def main():
