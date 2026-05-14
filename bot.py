@@ -15,10 +15,13 @@ from aiogram.types import (
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_СЮДА_ВАШ_ТОКЕН")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-REFERRAL_BONUS = 500  # бонус за приведённого друга, ₽
-MIN_WITHDRAW = 500    # минимальная сумма вывода, ₽
-# Стадия запуска: True = показывать пометку, что выплаты ещё не идут
+REFERRAL_BONUS = 500
+MIN_WITHDRAW = 500
 LAUNCH_MODE = True
+
+# Канал для автопостинга. Укажите username канала со знаком @
+# Например: "@authentiscan_ru". Если оставить пустым "" — автопостинг выключен.
+CHANNEL_USERNAME = ""
 # ============ КОНЕЦ НАСТРОЕК ============
 
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +50,11 @@ class ModerationForm(StatesGroup):
 class WithdrawForm(StatesGroup):
     waiting_amount = State()
     waiting_details = State()
+
+
+class BroadcastForm(StatesGroup):
+    waiting_text = State()
+    waiting_confirm = State()
 
 
 async def init_db():
@@ -87,7 +95,6 @@ async def init_db():
                 created_at TEXT
             )
         """)
-        # Безопасное обновление старых баз
         for table, col, coltype in [
             ("reports", "reward", "INTEGER DEFAULT 0"),
             ("reports", "reject_reason", "TEXT"),
@@ -103,12 +110,10 @@ async def init_db():
 
 async def save_user(user_id, username, full_name, referred_by=None):
     async with aiosqlite.connect(DB_PATH) as db:
-        # Проверяем, есть ли уже пользователь
         async with db.execute("SELECT telegram_id FROM users WHERE telegram_id=?", (user_id,)) as cursor:
             exists = await cursor.fetchone()
         if exists:
-            return False  # уже зарегистрирован, реферал не засчитывается
-        # Нельзя пригласить сам себя
+            return False
         if referred_by == user_id:
             referred_by = None
         await db.execute(
@@ -116,7 +121,14 @@ async def save_user(user_id, username, full_name, referred_by=None):
             (user_id, username, full_name, datetime.now().isoformat(), referred_by)
         )
         await db.commit()
-        return True  # новый пользователь
+        return True
+
+
+async def get_all_user_ids():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT telegram_id FROM users") as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
 
 
 async def save_report(user_id, data):
@@ -174,8 +186,7 @@ async def count_referrals(user_id):
         async with db.execute(
             "SELECT COUNT(*) FROM users WHERE referred_by=?", (user_id,)
         ) as cursor:
-            total = (await cursor.fetchone())[0]
-        return total
+            return (await cursor.fetchone())[0]
 
 
 async def mark_ref_bonus_paid(user_id):
@@ -185,8 +196,6 @@ async def mark_ref_bonus_paid(user_id):
 
 
 async def add_referral_bonus_to_balance(referrer_id, amount):
-    # Бонус оформляем как "виртуальную" подтверждённую запись в reports,
-    # чтобы он попал в баланс. Но проще — отдельная таблица. Здесь используем reports.
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO reports (user_id, brand, category, location, price, signs, photo_count, status, reward, created_at) "
@@ -203,19 +212,16 @@ async def get_user_stats(user_id):
             "SELECT COUNT(*), "
             "SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN status='confirmed' THEN reward ELSE 0 END) "
+            "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) "
             "FROM reports WHERE user_id=? AND brand != 'Реферальный бонус'",
             (user_id,)
         ) as cursor:
             row = await cursor.fetchone()
-        # Общий заработок включая бонусы
         async with db.execute(
             "SELECT SUM(CASE WHEN status='confirmed' THEN reward ELSE 0 END) FROM reports WHERE user_id=?",
             (user_id,)
         ) as cursor:
             total_earned = (await cursor.fetchone())[0] or 0
-        # Уже выведено
         async with db.execute(
             "SELECT SUM(amount) FROM withdrawals WHERE user_id=? AND status IN ('pending','paid')",
             (user_id,)
@@ -276,10 +282,16 @@ def main_menu_keyboard():
     ])
 
 
+# Извлечь город из строки локации (берём первое слово до запятой)
+def extract_city(location):
+    if not location:
+        return "не указан"
+    return location.split(",")[0].strip()
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, command: CommandObject):
     await state.clear()
-    # Разбираем реферальную ссылку: /start ref_12345
     referred_by = None
     if command.args and command.args.startswith("ref_"):
         try:
@@ -290,7 +302,6 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
     is_new = await save_user(message.from_user.id, message.from_user.username,
                              message.from_user.full_name, referred_by)
 
-    # Уведомим реферера, что пришёл новый друг
     if is_new and referred_by:
         try:
             await bot.send_message(
@@ -492,7 +503,6 @@ async def withdraw_details(message: Message, state: FSMContext):
         text += "⏳ Заявка обрабатывается. Деньги поступят в течение 1-3 дней."
     await message.answer(text)
 
-    # Уведомление админу
     if ADMIN_ID:
         try:
             await bot.send_message(
@@ -524,7 +534,6 @@ async def mark_paid(callback: CallbackQuery):
         return
     await update_withdrawal_status(withdrawal_id, 'paid')
     await callback.message.answer(f"✅ Выплата #{withdrawal_id} отмечена как выполненная.")
-    # Уведомляем охотника
     try:
         await bot.send_message(
             withdrawal[1],
@@ -754,7 +763,23 @@ async def set_reward(message: Message, state: FSMContext):
         logging.error(f"Не удалось уведомить охотника: {e}")
         await message.answer("⚠️ Не удалось отправить уведомление охотнику.")
 
-    # Проверка реферального бонуса: если это первая подтверждённая заявка охотника
+    # Автопостинг в канал
+    if CHANNEL_USERNAME:
+        try:
+            city = extract_city(report[4])
+            channel_text = (
+                f"🎯 Новая подтверждённая находка!\n\n"
+                f"🏷 Бренд: {report[2]}\n"
+                f"📦 Категория: {report[3]}\n"
+                f"📍 Город: {city}\n\n"
+                f"Ещё один контрафакт выявлен нашим сообществом. "
+                f"Хочешь так же? Открой бота и подай свою заявку!"
+            )
+            await bot.send_message(CHANNEL_USERNAME, channel_text)
+        except Exception as e:
+            logging.error(f"Не удалось опубликовать в канал: {e}")
+
+    # Реферальный бонус
     confirmed_count = await count_confirmed_reports(hunter_id)
     if confirmed_count == 1:
         ref_info = await get_user_referral_info(hunter_id)
@@ -817,6 +842,83 @@ async def set_reject_reason(message: Message, state: FSMContext):
         logging.error(f"Не удалось уведомить охотника: {e}")
         await message.answer("⚠️ Не удалось отправить уведомление охотнику.")
     await state.clear()
+
+
+# ============ РАССЫЛКА (только админ) ============
+
+@router.message(Command("broadcast"))
+async def broadcast_start(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.set_state(BroadcastForm.waiting_text)
+    await message.answer(
+        "📢 Рассылка всем пользователям\n\n"
+        "Напиши текст сообщения, которое получат ВСЕ пользователи бота.\n\n"
+        "Для отмены — напиши /cancel"
+    )
+
+
+@router.message(BroadcastForm.waiting_text, F.text == "/cancel")
+async def broadcast_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Рассылка отменена.")
+
+
+@router.message(BroadcastForm.waiting_text, F.text)
+async def broadcast_preview(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    broadcast_text = message.text
+    await state.update_data(broadcast_text=broadcast_text)
+    await state.set_state(BroadcastForm.waiting_confirm)
+    user_ids = await get_all_user_ids()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Отправить ({len(user_ids)} чел.)", callback_data="broadcast_confirm"),
+         InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")]
+    ])
+    await message.answer(
+        f"📢 Предпросмотр рассылки:\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"{broadcast_text}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"Получат: {len(user_ids)} пользователей.\n"
+        f"Отправить?",
+        reply_markup=keyboard
+    )
+
+
+@router.callback_query(F.data == "broadcast_cancel")
+async def broadcast_cancel_btn(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Рассылка отменена.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast_confirm")
+async def broadcast_send(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+    data = await state.get_data()
+    broadcast_text = data.get('broadcast_text')
+    await state.clear()
+    await callback.message.edit_text("📤 Рассылка началась...")
+    user_ids = await get_all_user_ids()
+    delivered = 0
+    failed = 0
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, broadcast_text)
+            delivered += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)  # пауза, чтобы не упереться в лимиты Telegram
+    await callback.message.answer(
+        f"✅ Рассылка завершена!\n\n"
+        f"📬 Доставлено: {delivered}\n"
+        f"❌ Не доставлено: {failed}"
+    )
+    await callback.answer()
 
 
 # ============ КОМАНДЫ АДМИНА ============
