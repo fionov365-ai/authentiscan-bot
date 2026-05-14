@@ -21,7 +21,7 @@ LAUNCH_MODE = True
 
 # Канал для автопостинга. Укажите username канала со знаком @
 # Например: "@authentiscan_ru". Если оставить пустым "" — автопостинг выключен.
-CHANNEL_USERNAME = ""
+CHANNEL_USERNAME = "Authentiscan_ru"
 # ============ КОНЕЦ НАСТРОЕК ============
 
 logging.basicConfig(level=logging.INFO)
