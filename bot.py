@@ -18,10 +18,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 REFERRAL_BONUS = 500
 MIN_WITHDRAW = 500
 LAUNCH_MODE = True
-
-# Канал для автопостинга. Укажите username канала со знаком @
-# Например: "@authentiscan_ru". Если оставить пустым "" — автопостинг выключен.
-CHANNEL_USERNAME = "Authentiscan_ru"
+CHANNEL_USERNAME = "@authentiscan_ru"
 # ============ КОНЕЦ НАСТРОЕК ============
 
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +50,11 @@ class WithdrawForm(StatesGroup):
 
 
 class BroadcastForm(StatesGroup):
+    waiting_text = State()
+    waiting_confirm = State()
+
+
+class PostForm(StatesGroup):
     waiting_text = State()
     waiting_confirm = State()
 
@@ -200,7 +202,8 @@ async def add_referral_bonus_to_balance(referrer_id, amount):
         await db.execute(
             "INSERT INTO reports (user_id, brand, category, location, price, signs, photo_count, status, reward, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (referrer_id, "Реферальный бонус", "Бонус", "—", "0", "Друг подал первую подтверждённую заявку",
+            (referrer_id, "Реферальный бонус", "Бонус", "—", "0",
+             "Друг подал первую подтверждённую заявку",
              0, "confirmed", amount, datetime.now().isoformat())
         )
         await db.commit()
@@ -272,6 +275,12 @@ async def get_withdrawal(withdrawal_id):
             return await cursor.fetchone()
 
 
+def extract_city(location):
+    if not location:
+        return "не указан"
+    return location.split(",")[0].strip()
+
+
 def main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Подать заявку", callback_data="new_report")],
@@ -280,13 +289,6 @@ def main_menu_keyboard():
         [InlineKeyboardButton(text="👥 Пригласить друзей", callback_data="referral")],
         [InlineKeyboardButton(text="ℹ️ Как это работает", callback_data="how_it_works")]
     ])
-
-
-# Извлечь город из строки локации (берём первое слово до запятой)
-def extract_city(location):
-    if not location:
-        return "не указан"
-    return location.split(",")[0].strip()
 
 
 @router.message(CommandStart())
@@ -298,23 +300,22 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
             referred_by = int(command.args.replace("ref_", ""))
         except ValueError:
             referred_by = None
-
     is_new = await save_user(message.from_user.id, message.from_user.username,
                              message.from_user.full_name, referred_by)
-
     if is_new and referred_by:
         try:
             await bot.send_message(
                 referred_by,
                 f"🎉 По твоей ссылке зарегистрировался новый охотник!\n\n"
-                f"Когда он получит первую подтверждённую заявку — ты получишь бонус {REFERRAL_BONUS} ₽."
+                f"Когда он получит первую подтверждённую заявку — "
+                f"ты получишь бонус {REFERRAL_BONUS} ₽."
             )
         except Exception:
             pass
-
     text = (
         "👋 Привет! Я бот AuthentiScan.\n\n"
-        "Помогаю охотникам за подделками находить контрафакт и получать вознаграждение от брендов.\n\n"
+        "Помогаю охотникам за подделками находить контрафакт "
+        "и получать вознаграждение от брендов.\n\n"
         "💰 За каждую подтверждённую заявку — от 1,000 до 50,000 ₽\n"
         "👥 Приглашай друзей — получай бонусы\n"
         "🌍 Работаем в 50+ городах России и СНГ"
@@ -343,7 +344,10 @@ async def how_it_works(callback: CallbackQuery):
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("🏠 Главное меню\n\nВыбери действие:", reply_markup=main_menu_keyboard())
+    await callback.message.edit_text(
+        "🏠 Главное меню\n\nВыбери действие:",
+        reply_markup=main_menu_keyboard()
+    )
     await callback.answer()
 
 
@@ -354,7 +358,8 @@ async def referral_menu(callback: CallbackQuery):
     refs_count = await count_referrals(callback.from_user.id)
     text = (
         f"👥 Приглашай друзей и зарабатывай\n\n"
-        f"За каждого друга, который зарегистрируется по твоей ссылке и получит первую подтверждённую заявку, "
+        f"За каждого друга, который зарегистрируется по твоей ссылке "
+        f"и получит первую подтверждённую заявку, "
         f"ты получаешь бонус {REFERRAL_BONUS} ₽.\n\n"
         f"━━━━━━━━━━━━━━━\n"
         f"👥 Приглашено друзей: {refs_count}\n"
@@ -366,7 +371,9 @@ async def referral_menu(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
     ])
-    await callback.message.edit_text(text, reply_markup=keyboard, disable_web_page_preview=True)
+    await callback.message.edit_text(
+        text, reply_markup=keyboard, disable_web_page_preview=True
+    )
     await callback.answer()
 
 
@@ -392,8 +399,8 @@ async def my_cabinet(callback: CallbackQuery):
     if LAUNCH_MODE:
         text += (
             "\n\n⚠️ Платформа в стадии запуска. Накопленный баланс реален, "
-            "но реальные выплаты начнутся после подключения первых брендов-партнёров. "
-            "Следи за новостями в канале!"
+            "но реальные выплаты начнутся после подключения первых "
+            "брендов-партнёров. Следи за новостями в канале!"
         )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Вывести средства", callback_data="withdraw")],
@@ -412,7 +419,8 @@ async def my_reports(callback: CallbackQuery):
     else:
         text = "📋 Твои последние заявки:\n\n"
         status_emoji = {'pending': '⏳', 'confirmed': '✅', 'rejected': '❌'}
-        status_name = {'pending': 'На проверке', 'confirmed': 'Подтверждено', 'rejected': 'Отклонено'}
+        status_name = {'pending': 'На проверке', 'confirmed': 'Подтверждено',
+                       'rejected': 'Отклонено'}
         for r in reports:
             rid, brand, category, status, reward, created = r
             emoji = status_emoji.get(status, '⏳')
@@ -437,7 +445,8 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
     stats = await get_user_stats(callback.from_user.id)
     if stats['balance'] < MIN_WITHDRAW:
         await callback.answer(
-            f"Минимальная сумма вывода — {MIN_WITHDRAW} ₽. У тебя на балансе {stats['balance']} ₽.",
+            f"Минимальная сумма вывода — {MIN_WITHDRAW} ₽. "
+            f"У тебя на балансе {stats['balance']} ₽.",
             show_alert=True
         )
         return
@@ -451,8 +460,9 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
     ).replace(",", " ")
     if LAUNCH_MODE:
         text += (
-            "\n\n⚠️ Сейчас платформа в стадии запуска. Заявка на вывод будет принята "
-            "и обработана после подключения первых брендов-партнёров."
+            "\n\n⚠️ Сейчас платформа в стадии запуска. "
+            "Заявка на вывод будет принята и обработана "
+            "после подключения первых брендов-партнёров."
         )
     await callback.message.answer(text)
     await callback.answer()
@@ -471,7 +481,10 @@ async def withdraw_amount(message: Message, state: FSMContext):
         await message.answer(f"❌ Минимальная сумма вывода — {MIN_WITHDRAW} ₽.")
         return
     if amount > max_balance:
-        await message.answer(f"❌ На балансе только {max_balance:,} ₽. Введи меньшую сумму.".replace(",", " "))
+        await message.answer(
+            f"❌ На балансе только {max_balance:,} ₽. "
+            f"Введи меньшую сумму.".replace(",", " ")
+        )
         return
     await state.update_data(withdraw_amount=amount)
     await state.set_state(WithdrawForm.waiting_details)
@@ -496,13 +509,13 @@ async def withdraw_details(message: Message, state: FSMContext):
     ).replace(",", " ")
     if LAUNCH_MODE:
         text += (
-            "⏳ Платформа в стадии запуска. Заявка сохранена и будет обработана "
-            "после подключения брендов-партнёров. Мы уведомим тебя!"
+            "⏳ Платформа в стадии запуска. Заявка сохранена "
+            "и будет обработана после подключения брендов-партнёров. "
+            "Мы уведомим тебя!"
         )
     else:
         text += "⏳ Заявка обрабатывается. Деньги поступят в течение 1-3 дней."
     await message.answer(text)
-
     if ADMIN_ID:
         try:
             await bot.send_message(
@@ -514,7 +527,10 @@ async def withdraw_details(message: Message, state: FSMContext):
                 f"💵 Сумма: {amount:,} ₽\n".replace(",", " ") +
                 f"💳 Реквизиты: {details}",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="✅ Выплачено", callback_data=f"paid_{withdrawal_id}")]
+                    [InlineKeyboardButton(
+                        text="✅ Выплачено",
+                        callback_data=f"paid_{withdrawal_id}"
+                    )]
                 ])
             )
         except Exception as e:
@@ -533,11 +549,14 @@ async def mark_paid(callback: CallbackQuery):
         await callback.answer("Заявка не найдена", show_alert=True)
         return
     await update_withdrawal_status(withdrawal_id, 'paid')
-    await callback.message.answer(f"✅ Выплата #{withdrawal_id} отмечена как выполненная.")
+    await callback.message.answer(
+        f"✅ Выплата #{withdrawal_id} отмечена как выполненная."
+    )
     try:
         await bot.send_message(
             withdrawal[1],
-            f"💰 Выплата по заявке #{withdrawal_id} на сумму {withdrawal[2]:,} ₽ выполнена!\n\n".replace(",", " ") +
+            f"💰 Выплата по заявке #{withdrawal_id} "
+            f"на сумму {withdrawal[2]:,} ₽ выполнена!\n\n".replace(",", " ") +
             f"Проверь поступление по реквизитам: {withdrawal[3]}\n\n"
             f"Спасибо, что с нами! Продолжай находить подделки 🔍"
         )
@@ -572,10 +591,15 @@ async def process_photo(message: Message, state: FSMContext):
     photos.append(message.photo[-1].file_id)
     await state.update_data(photos=photos)
     if len(photos) < 2:
-        await message.answer(f"📷 Фото {len(photos)}/5 получено. Добавь ещё минимум одно.")
+        await message.answer(
+            f"📷 Фото {len(photos)}/5 получено. Добавь ещё минимум одно."
+        )
     elif len(photos) < 5:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➡️ Достаточно, дальше", callback_data="photos_done")]
+            [InlineKeyboardButton(
+                text="➡️ Достаточно, дальше",
+                callback_data="photos_done"
+            )]
         ])
         await message.answer(f"✅ Фото {len(photos)}/5 получено.", reply_markup=keyboard)
     else:
@@ -639,7 +663,10 @@ async def select_category(callback: CallbackQuery, state: FSMContext):
     category = callback.data.replace("cat_", "")
     await state.update_data(category=category)
     await state.set_state(ReportForm.location)
-    await callback.message.answer("📍 Шаг 4 из 6: Место\n\nГде купил товар? Напиши адрес или название магазина:")
+    await callback.message.answer(
+        "📍 Шаг 4 из 6: Место\n\n"
+        "Где купил товар? Напиши адрес или название магазина:"
+    )
     await callback.answer()
 
 
@@ -688,7 +715,6 @@ async def set_signs(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_menu")]
     ])
     await message.answer(text, reply_markup=keyboard)
-
     if ADMIN_ID:
         try:
             admin_text = (
@@ -704,8 +730,14 @@ async def set_signs(message: Message, state: FSMContext):
                 f"📸 Фото ниже ⬇️"
             )
             mod_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{report_id}"),
-                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{report_id}")]
+                [InlineKeyboardButton(
+                    text="✅ Подтвердить",
+                    callback_data=f"approve_{report_id}"
+                ),
+                 InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"reject_{report_id}"
+                )]
             ])
             await bot.send_message(ADMIN_ID, admin_text, reply_markup=mod_keyboard)
             for photo_id in data['photos']:
@@ -749,7 +781,10 @@ async def set_reward(message: Message, state: FSMContext):
         await state.clear()
         return
     await update_report_status(report_id, 'confirmed', reward=reward)
-    await message.answer(f"✅ Заявка #{report_id} подтверждена. Награда: {reward:,} ₽".replace(",", " "))
+    await message.answer(
+        f"✅ Заявка #{report_id} подтверждена. "
+        f"Награда: {reward:,} ₽".replace(",", " ")
+    )
     hunter_id = report[1]
     try:
         await bot.send_message(
@@ -757,7 +792,8 @@ async def set_reward(message: Message, state: FSMContext):
             f"🎉 Отличные новости!\n\n"
             f"Твоя заявка #{report_id} ({report[2]}) подтверждена!\n\n"
             f"💰 Вознаграждение: {reward:,} ₽\n\n".replace(",", " ") +
-            f"Сумма зачислена на твой баланс. Спасибо за помощь в борьбе с контрафактом!"
+            f"Сумма зачислена на твой баланс. "
+            f"Спасибо за помощь в борьбе с контрафактом!"
         )
     except Exception as e:
         logging.error(f"Не удалось уведомить охотника: {e}")
@@ -791,12 +827,15 @@ async def set_reward(message: Message, state: FSMContext):
                 await bot.send_message(
                     referrer,
                     f"🎁 Реферальный бонус!\n\n"
-                    f"Приглашённый тобой охотник получил первую подтверждённую заявку.\n"
+                    f"Приглашённый тобой охотник получил первую "
+                    f"подтверждённую заявку.\n"
                     f"Тебе начислен бонус {REFERRAL_BONUS} ₽ на баланс!"
                 )
             except Exception:
                 pass
-            await message.answer(f"ℹ️ Рефереру охотника начислен бонус {REFERRAL_BONUS} ₽.")
+            await message.answer(
+                f"ℹ️ Рефереру охотника начислен бонус {REFERRAL_BONUS} ₽."
+            )
     await state.clear()
 
 
@@ -836,12 +875,96 @@ async def set_reject_reason(message: Message, state: FSMContext):
             f"📋 Обновление по заявке #{report_id} ({report[2]})\n\n"
             f"К сожалению, заявка отклонена.\n\n"
             f"Причина: {reason}\n\n"
-            f"Не расстраивайся — подавай новые заявки, учитывая этот опыт!"
+            f"Не расстраивайся — подавай новые заявки, "
+            f"учитывая этот опыт!"
         )
     except Exception as e:
         logging.error(f"Не удалось уведомить охотника: {e}")
         await message.answer("⚠️ Не удалось отправить уведомление охотнику.")
     await state.clear()
+
+
+# ============ ПОСТ В КАНАЛ (только админ) ============
+
+@router.message(Command("post"))
+async def post_start(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not CHANNEL_USERNAME:
+        await message.answer(
+            "❌ Канал не настроен.\n\n"
+            "Укажите CHANNEL_USERNAME в настройках бота."
+        )
+        return
+    await state.set_state(PostForm.waiting_text)
+    await message.answer(
+        f"📢 Публикация поста в канал {CHANNEL_USERNAME}\n\n"
+        "Напиши текст поста. Поддерживается форматирование:\n"
+        "*жирный*, _курсив_, `код`\n\n"
+        "Для отмены — напиши /cancel"
+    )
+
+
+@router.message(PostForm.waiting_text, F.text == "/cancel")
+async def post_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Публикация отменена.")
+
+
+@router.message(PostForm.waiting_text, F.text)
+async def post_preview(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    post_text = message.text
+    await state.update_data(post_text=post_text)
+    await state.set_state(PostForm.waiting_confirm)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Опубликовать", callback_data="post_confirm"),
+         InlineKeyboardButton(text="❌ Отмена", callback_data="post_cancel_btn")]
+    ])
+    await message.answer(
+        f"👁 Предпросмотр поста в {CHANNEL_USERNAME}:\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"{post_text}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"Всё верно? Публикуем?",
+        reply_markup=keyboard
+    )
+
+
+@router.callback_query(F.data == "post_cancel_btn")
+async def post_cancel_btn(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Публикация отменена.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "post_confirm")
+async def post_send(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+    data = await state.get_data()
+    post_text = data.get('post_text')
+    await state.clear()
+    try:
+        await bot.send_message(
+            CHANNEL_USERNAME,
+            post_text,
+            parse_mode="Markdown"
+        )
+        await callback.message.edit_text(
+            f"✅ Пост опубликован в {CHANNEL_USERNAME}!"
+        )
+    except Exception as e:
+        await callback.message.edit_text(
+            f"❌ Не удалось опубликовать пост.\n\n"
+            f"Проверьте:\n"
+            f"• Бот добавлен как администратор канала\n"
+            f"• Username канала указан верно: {CHANNEL_USERNAME}\n\n"
+            f"Ошибка: {e}"
+        )
+    await callback.answer()
 
 
 # ============ РАССЫЛКА (только админ) ============
@@ -873,8 +996,11 @@ async def broadcast_preview(message: Message, state: FSMContext):
     await state.set_state(BroadcastForm.waiting_confirm)
     user_ids = await get_all_user_ids()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"✅ Отправить ({len(user_ids)} чел.)", callback_data="broadcast_confirm"),
-         InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")]
+        [InlineKeyboardButton(
+            text=f"✅ Отправить ({len(user_ids)} чел.)",
+            callback_data="broadcast_confirm"
+        ),
+         InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel_btn")]
     ])
     await message.answer(
         f"📢 Предпросмотр рассылки:\n"
@@ -887,7 +1013,7 @@ async def broadcast_preview(message: Message, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "broadcast_cancel")
+@router.callback_query(F.data == "broadcast_cancel_btn")
 async def broadcast_cancel_btn(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("Рассылка отменена.")
@@ -912,7 +1038,7 @@ async def broadcast_send(callback: CallbackQuery, state: FSMContext):
             delivered += 1
         except Exception:
             failed += 1
-        await asyncio.sleep(0.05)  # пауза, чтобы не упереться в лимиты Telegram
+        await asyncio.sleep(0.05)
     await callback.message.answer(
         f"✅ Рассылка завершена!\n\n"
         f"📬 Доставлено: {delivered}\n"
@@ -930,17 +1056,30 @@ async def admin_stats(message: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM users") as cursor:
             users_count = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM reports WHERE brand != 'Реферальный бонус'") as cursor:
+        async with db.execute(
+            "SELECT COUNT(*) FROM reports WHERE brand != 'Реферальный бонус'"
+        ) as cursor:
             reports_count = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM reports WHERE status='pending'") as cursor:
+        async with db.execute(
+            "SELECT COUNT(*) FROM reports WHERE status='pending'"
+        ) as cursor:
             pending_count = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM reports WHERE status='confirmed' AND brand != 'Реферальный бонус'") as cursor:
+        async with db.execute(
+            "SELECT COUNT(*) FROM reports WHERE status='confirmed' "
+            "AND brand != 'Реферальный бонус'"
+        ) as cursor:
             confirmed_count = (await cursor.fetchone())[0]
-        async with db.execute("SELECT SUM(reward) FROM reports WHERE status='confirmed'") as cursor:
+        async with db.execute(
+            "SELECT SUM(reward) FROM reports WHERE status='confirmed'"
+        ) as cursor:
             total_rewards = (await cursor.fetchone())[0] or 0
-        async with db.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'") as cursor:
+        async with db.execute(
+            "SELECT COUNT(*) FROM withdrawals WHERE status='pending'"
+        ) as cursor:
             pending_withdrawals = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE referred_by IS NOT NULL") as cursor:
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE referred_by IS NOT NULL"
+        ) as cursor:
             referred_users = (await cursor.fetchone())[0]
     await message.answer(
         f"📊 Статистика бота:\n\n"
