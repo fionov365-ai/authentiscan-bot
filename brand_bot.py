@@ -618,11 +618,11 @@ async def brand_help(message: Message):
     )
 
 
-async def main():
+async def run():
     await init_brand_db()
     logging.info("Бот для брендов запущен!")
     await dp.start_polling(brand_bot)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run())
