@@ -1391,7 +1391,7 @@ async def cmd_help(message: Message):
 
 async def main():
     await init_db()
-    logging.info("Бот запущен!")
+    logging.info("Бот охотников запущен!")
     await dp.start_polling(bot)
 
 
