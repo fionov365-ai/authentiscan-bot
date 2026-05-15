@@ -31,6 +31,21 @@ dp.include_router(router)
 DB_PATH = "bot.db"
 
 
+# ============ ИНТЕГРАЦИЯ С GOOGLE SHEETS ============
+# По той же схеме, что в bot.py: функции append_to_sheet /
+# update_status_in_sheet регистрируются в __builtins__ из main.py.
+# Здесь — безопасные обёртки, которые ничего не ломают, если
+# Google Sheets не подключён.
+
+def sheets_update(rid, status):
+    try:
+        fn = getattr(__builtins__, 'update_status_in_sheet', None)
+        if callable(fn):
+            fn(rid, status)
+    except Exception:
+        pass
+
+
 class BrandRegForm(StatesGroup):
     waiting_company = State()
     waiting_brand_name = State()
@@ -446,6 +461,9 @@ async def brand_set_reward(message: Message, state: FSMContext):
         return
 
     await update_report_status(report_id, 'confirmed', reward=reward)
+    # Google Sheets — обновляем статус заявки
+    sheets_update(report_id, f"confirmed by brand ({reward} ₽)")
+
     await message.answer(
         f"✅ Заявка #{report_id} подтверждена!\n"
         f"Награда охотнику: {reward:,} ₽".replace(",", " "),
@@ -510,6 +528,9 @@ async def brand_set_reject_reason(message: Message, state: FSMContext):
     await update_report_status(
         report_id, 'rejected', reject_reason=reason
     )
+    # Google Sheets — обновляем статус заявки
+    sheets_update(report_id, "rejected by brand")
+
     await message.answer(
         f"❌ Заявка #{report_id} отклонена.",
         reply_markup=brand_main_menu()
