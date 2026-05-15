@@ -13,11 +13,8 @@ from aiogram.types import (
 )
 
 # ============ НАСТРОЙКИ ============
-# Токен бота для брендов (от @BotFather)
 BRAND_BOT_TOKEN = os.getenv("BRAND_BOT_TOKEN", "ВСТАВЬТЕ_ТОКЕН_БРЕНД_БОТА")
-# Токен основного бота (чтобы уведомлять охотников)
 MAIN_BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_ТОКЕН_ОСНОВНОГО_БОТА")
-# Ваш Telegram ID (для уведомлений о новых регистрациях брендов)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 # ============ КОНЕЦ НАСТРОЕК ============
 
@@ -32,10 +29,6 @@ DB_PATH = "bot.db"
 
 
 # ============ ИНТЕГРАЦИЯ С GOOGLE SHEETS ============
-# По той же схеме, что в bot.py: функции append_to_sheet /
-# update_status_in_sheet регистрируются в __builtins__ из main.py.
-# Здесь — безопасные обёртки, которые ничего не ломают, если
-# Google Sheets не подключён.
 
 def sheets_update(rid, status):
     try:
@@ -101,7 +94,7 @@ async def update_brand_profile(user_id, company, brand_name, contact):
         await db.execute(
             "UPDATE brand_users SET company=?, brand_name=?, "
             "contact=?, status='active' WHERE telegram_id=?",
-            (company, brand_name, contact, user_id)
+            (company, brand_name.strip(), contact, user_id)
         )
         await db.commit()
 
@@ -117,23 +110,26 @@ async def get_brand_user(user_id):
 
 
 async def get_brand_reports(brand_name, status=None, limit=20):
+    needle = (brand_name or "").strip().lower()
     async with aiosqlite.connect(DB_PATH) as db:
         if status:
             async with db.execute(
                 "SELECT id, user_id, brand, category, location, "
                 "price, signs, photo_count, status, reward, created_at "
-                "FROM reports WHERE brand=? AND status=? "
+                "FROM reports "
+                "WHERE LOWER(TRIM(brand))=? AND status=? "
                 "ORDER BY id DESC LIMIT ?",
-                (brand_name, status, limit)
+                (needle, status, limit)
             ) as cursor:
                 return await cursor.fetchall()
         else:
             async with db.execute(
                 "SELECT id, user_id, brand, category, location, "
                 "price, signs, photo_count, status, reward, created_at "
-                "FROM reports WHERE brand=? "
+                "FROM reports "
+                "WHERE LOWER(TRIM(brand))=? "
                 "ORDER BY id DESC LIMIT ?",
-                (brand_name, limit)
+                (needle, limit)
             ) as cursor:
                 return await cursor.fetchall()
 
@@ -161,6 +157,7 @@ async def update_report_status(report_id, status,
 
 
 async def get_brand_stats(brand_name):
+    needle = (brand_name or "").strip().lower()
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT COUNT(*), "
@@ -168,8 +165,8 @@ async def get_brand_stats(brand_name):
             "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='confirmed' THEN reward ELSE 0 END) "
-            "FROM reports WHERE brand=?",
-            (brand_name,)
+            "FROM reports WHERE LOWER(TRIM(brand))=?",
+            (needle,)
         ) as cursor:
             row = await cursor.fetchone()
             return {
@@ -210,7 +207,6 @@ async def brand_start(message: Message, state: FSMContext):
     brand = await get_brand_user(message.from_user.id)
 
     if brand and brand[4] == 'active':
-        # Уже зарегистрирован
         await message.answer(
             f"🏢 Добро пожаловать, {brand[1]}!\n\n"
             f"Бренд: {brand[2]}\n\n"
@@ -218,7 +214,6 @@ async def brand_start(message: Message, state: FSMContext):
             reply_markup=brand_main_menu()
         )
     else:
-        # Новый — начинаем регистрацию
         await save_brand_user(
             message.from_user.id,
             message.from_user.username,
@@ -237,18 +232,19 @@ async def brand_start(message: Message, state: FSMContext):
 
 @router.message(BrandRegForm.waiting_company, F.text)
 async def brand_reg_company(message: Message, state: FSMContext):
-    await state.update_data(company=message.text)
+    await state.update_data(company=message.text.strip())
     await state.set_state(BrandRegForm.waiting_brand_name)
     await message.answer(
         "✅ Компания сохранена.\n\n"
-        "🏷 Введите название бренда который нужно защитить\n"
-        "(например: Nike, Apple, Chanel):"
+        "🏷 Введите название бренда который нужно защитить.\n"
+        "⚠️ Важно: пишите ровно так, как охотники видят его "
+        "в списке (Nike, Adidas, Apple, Chanel и т.д.):"
     )
 
 
 @router.message(BrandRegForm.waiting_brand_name, F.text)
 async def brand_reg_name(message: Message, state: FSMContext):
-    await state.update_data(brand_name=message.text)
+    await state.update_data(brand_name=message.text.strip())
     await state.set_state(BrandRegForm.waiting_contact)
     await message.answer(
         "✅ Бренд сохранён.\n\n"
@@ -268,7 +264,6 @@ async def brand_reg_contact(message: Message, state: FSMContext):
     )
     await state.clear()
 
-    # Уведомляем платформу о новом бренде
     if ADMIN_ID:
         try:
             await main_bot.send_message(
@@ -310,9 +305,14 @@ async def brand_reports_pending(callback: CallbackQuery):
     if not reports:
         await callback.message.edit_text(
             "📋 Новых заявок нет.\n\n"
-            "Охотники активно ищут контрафакт — "
-            "заявки появятся здесь как только будут найдены.",
+            "Если охотники подавали заявки на ваш бренд, "
+            "проверьте раздел ✅ Подтверждённые — возможно, "
+            "их уже обработал админ платформы.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="✅ Подтверждённые",
+                    callback_data="brand_reports_confirmed"
+                )],
                 [InlineKeyboardButton(
                     text="⬅️ В меню",
                     callback_data="brand_menu"
@@ -363,13 +363,13 @@ async def brand_reports_confirmed(callback: CallbackQuery):
         )
     else:
         text = f"✅ Подтверждённые заявки ({len(reports)}):\n\n"
-        status_emoji = {'confirmed': '✅', 'pending': '⏳', 'rejected': '❌'}
         for r in reports[:10]:
             rid, uid, brand_n, cat, loc, price, signs, photos, status, reward, created = r
             city = loc.split(",")[0].strip() if loc else "—"
+            reward_val = reward or 0
             text += (
                 f"✅ #{rid} · {cat} · {city} · "
-                f"Награда: {reward:,} ₽\n".replace(",", " ")
+                f"Награда: {reward_val:,} ₽\n".replace(",", " ")
             )
         await callback.message.edit_text(
             text,
@@ -461,7 +461,6 @@ async def brand_set_reward(message: Message, state: FSMContext):
         return
 
     await update_report_status(report_id, 'confirmed', reward=reward)
-    # Google Sheets — обновляем статус заявки
     sheets_update(report_id, f"confirmed by brand ({reward} ₽)")
 
     await message.answer(
@@ -470,7 +469,6 @@ async def brand_set_reward(message: Message, state: FSMContext):
         reply_markup=brand_main_menu()
     )
 
-    # Уведомляем охотника через основной бот
     hunter_id = report[1]
     try:
         await main_bot.send_message(
@@ -488,7 +486,6 @@ async def brand_set_reward(message: Message, state: FSMContext):
             "возможно, он заблокировал основной бот."
         )
 
-    # Уведомляем платформу (вас)
     if ADMIN_ID:
         try:
             await main_bot.send_message(
@@ -528,7 +525,6 @@ async def brand_set_reject_reason(message: Message, state: FSMContext):
     await update_report_status(
         report_id, 'rejected', reject_reason=reason
     )
-    # Google Sheets — обновляем статус заявки
     sheets_update(report_id, "rejected by brand")
 
     await message.answer(
@@ -536,7 +532,6 @@ async def brand_set_reject_reason(message: Message, state: FSMContext):
         reply_markup=brand_main_menu()
     )
 
-    # Уведомляем охотника
     hunter_id = report[1]
     try:
         await main_bot.send_message(
@@ -548,7 +543,6 @@ async def brand_set_reject_reason(message: Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Ошибка уведомления охотника: {e}")
 
-    # Уведомляем платформу
     if ADMIN_ID:
         try:
             await main_bot.send_message(
@@ -627,11 +621,50 @@ async def brand_menu(callback: CallbackQuery):
     await callback.answer()
 
 
+# ============ ДИАГНОСТИКА ============
+
+@router.message(Command("debug"))
+async def brand_debug(message: Message):
+    brand = await get_brand_user(message.from_user.id)
+    if not brand:
+        await message.answer("Вы ещё не зарегистрированы. /start")
+        return
+
+    my_brand = brand[2] or ""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT DISTINCT brand FROM reports ORDER BY brand"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        async with db.execute(
+            "SELECT COUNT(*), status FROM reports "
+            "WHERE LOWER(TRIM(brand))=? GROUP BY status",
+            (my_brand.strip().lower(),)
+        ) as cursor:
+            my_stats = await cursor.fetchall()
+
+    all_brands = ", ".join([f"«{r[0]}»" for r in rows]) or "(нет заявок)"
+    by_status = "\n".join(
+        [f"  {st}: {cnt}" for cnt, st in my_stats]
+    ) or "  (нет совпадений)"
+
+    await message.answer(
+        f"🔧 Диагностика\n\n"
+        f"Ваш бренд в боте: «{my_brand}»\n"
+        f"После нормализации: «{my_brand.strip().lower()}»\n\n"
+        f"📊 Заявки на ваш бренд по статусам:\n{by_status}\n\n"
+        f"📋 Все бренды в БД заявок:\n{all_brands}\n\n"
+        f"Если ваш бренд написан иначе чем в заявках — "
+        f"обратитесь к админу, чтобы он привёл названия к одному виду."
+    )
+
+
 @router.message(Command("help"))
 async def brand_help(message: Message):
     await message.answer(
         "ℹ️ Помощь для брендов\n\n"
-        "/start — главное меню\n\n"
+        "/start — главное меню\n"
+        "/debug — диагностика (если не видно заявок)\n\n"
         "📋 Новые заявки — заявки ожидающие вашей проверки\n"
         "✅ Подтверждённые — история принятых заявок\n"
         "📊 Статистика — сводка по вашему бренду\n\n"
